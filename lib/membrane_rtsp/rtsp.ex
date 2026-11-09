@@ -203,15 +203,24 @@ defmodule Membrane.RTSP do
   defp do_start(url, options, start_fun) do
     case URI.parse(url) do
       %URI{host: host, scheme: "rtsp"} = url when is_binary(host) ->
-        start_fun.(__MODULE__, %{
-          url: %URI{url | port: url.port || @default_rtsp_port, path: url.path || "/"},
-          options: options
-        })
+        if control_characters?(URI.to_string(url)) do
+          {:error, :invalid_url}
+        else
+          start_fun.(__MODULE__, %{
+            url: %URI{url | port: url.port || @default_rtsp_port, path: url.path || "/"},
+            options: options
+          })
+        end
 
       _else ->
         {:error, :invalid_url}
     end
   end
+
+  # A URL goes into the request line and a header, where a raw line break
+  # would start a new header.
+  @spec control_characters?(binary()) :: boolean()
+  defp control_characters?(value), do: value =~ ~r/[\x00-\x1f\x7f]/
 
   @spec execute(Request.t(), State.t()) :: {:ok, binary()} | {:error, reason :: any()}
   defp execute(request, state) do
@@ -352,7 +361,7 @@ defmodule Membrane.RTSP do
   @spec header_safe_decode(String.t()) :: String.t()
   defp header_safe_decode(value) do
     decoded = decode(value)
-    if decoded =~ ~r/[\x00-\x1f\x7f]/, do: value, else: decoded
+    if control_characters?(decoded), do: value, else: decoded
   end
 
   @spec quoted_string(String.t()) :: String.t()
