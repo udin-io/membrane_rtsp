@@ -292,7 +292,8 @@ defmodule Membrane.RTSP do
 
   @spec do_apply_credentials(Request.t(), URI.t(), State.auth()) :: Request.t()
   defp do_apply_credentials(request, %URI{userinfo: info}, :basic) do
-    encoded = Base.encode64(info)
+    {username, password} = credentials(info)
+    encoded = Base.encode64(username <> ":" <> password)
     Request.with_header(request, "Authorization", "Basic " <> encoded)
   end
 
@@ -307,7 +308,7 @@ defmodule Membrane.RTSP do
 
   @spec encode_digest(Request.t(), URI.t(), State.digest_opts()) :: String.t()
   defp encode_digest(request, %URI{userinfo: userinfo} = uri, options) do
-    [username, password] = String.split(userinfo, ":", parts: 2)
+    {username, password} = credentials(userinfo)
     encoded_uri = Request.process_uri(request, uri)
     ha1 = md5([username, options.realm, password])
     ha2 = md5([request.method, encoded_uri])
@@ -316,7 +317,7 @@ defmodule Membrane.RTSP do
     Enum.join(
       [
         "Digest",
-        ~s(username="#{username}",),
+        ~s(username="#{quoted_string(username)}",),
         ~s(realm="#{options.realm}",),
         ~s(nonce="#{options.nonce}",),
         ~s(uri="#{encoded_uri}",),
@@ -325,6 +326,37 @@ defmodule Membrane.RTSP do
       " "
     )
   end
+
+  # The userinfo of a URL is percent-encoded, while a camera checks the login
+  # itself. A malformed escape is a raw `%` the caller typed, so it stays as is.
+  @spec credentials(String.t()) :: {String.t(), String.t()}
+  defp credentials(userinfo) do
+    {username, password} =
+      case String.split(userinfo, ":", parts: 2) do
+        [username, password] -> {username, password}
+        [username] -> {username, ""}
+      end
+
+    {header_safe_decode(username), decode(password)}
+  end
+
+  @spec decode(String.t()) :: String.t()
+  defp decode(value) do
+    URI.decode(value)
+  rescue
+    ArgumentError -> value
+  end
+
+  # The username goes into a request header, so an escaped control character
+  # stays escaped: decoded, a line break would start a new header.
+  @spec header_safe_decode(String.t()) :: String.t()
+  defp header_safe_decode(value) do
+    decoded = decode(value)
+    if decoded =~ ~r/[\x00-\x1f\x7f]/, do: value, else: decoded
+  end
+
+  @spec quoted_string(String.t()) :: String.t()
+  defp quoted_string(value), do: String.replace(value, ["\\", "\""], &("\\" <> &1))
 
   @spec md5([String.t()]) :: String.t()
   defp md5(value) do

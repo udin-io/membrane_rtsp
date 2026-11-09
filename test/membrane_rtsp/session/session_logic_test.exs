@@ -160,6 +160,64 @@ defmodule Membrane.RTSP.SessionLogicTest do
     assert {:reply, {:ok, _response}, _state} = RTSP.handle_call({:execute, request}, nil, state)
   end
 
+  test "digest auth signs the decoded login", %{state: state, request: request} do
+    md5 = &(&1 |> :erlang.md5() |> Base.encode16(case: :lower))
+    ha1 = md5.("us@er:realm:Secure!2026")
+    ha2 = md5.("#{request.method}:rtsp://localhost:5554/vod/mp4:name.mov")
+    response = md5.("#{ha1}:nonce:#{ha2}")
+
+    mock(:gen_tcp, [send: 2], fn _socket, serialized_request ->
+      assert serialized_request =~ ~s(username="us@er")
+      assert serialized_request =~ ~s(response="#{response}")
+      mock_response(serialized_request)
+    end)
+
+    parsed_uri = URI.parse("rtsp://us%40er:Secure%212026@localhost:5554/vod/mp4:name.mov")
+    state = %State{state | uri: parsed_uri, auth: {:digest, %{nonce: "nonce", realm: "realm"}}}
+
+    assert {:reply, {:ok, _response}, _state} = RTSP.handle_call({:execute, request}, nil, state)
+  end
+
+  test "basic auth sends the decoded login", %{state: state, request: request} do
+    expected = Base.encode64("us@er:Secure!2026")
+
+    mock(:gen_tcp, [send: 2], fn _socket, serialized_request ->
+      assert serialized_request =~ "Authorization: Basic #{expected}"
+      mock_response(serialized_request)
+    end)
+
+    parsed_uri = URI.parse("rtsp://us%40er:Secure%212026@localhost:5554/vod/mp4:name.mov")
+    state = %State{state | uri: parsed_uri, auth: :basic}
+
+    assert {:reply, {:ok, _response}, _state} = RTSP.handle_call({:execute, request}, nil, state)
+  end
+
+  test "a raw percent sign stays as typed", %{state: state, request: request} do
+    expected = Base.encode64("user:100%")
+
+    mock(:gen_tcp, [send: 2], fn _socket, serialized_request ->
+      assert serialized_request =~ "Authorization: Basic #{expected}"
+      mock_response(serialized_request)
+    end)
+
+    state = %State{state | uri: URI.parse("rtsp://user:100%@localhost:5554/s"), auth: :basic}
+
+    assert {:reply, {:ok, _response}, _state} = RTSP.handle_call({:execute, request}, nil, state)
+  end
+
+  test "an escaped line break in the username adds no header", %{state: state, request: request} do
+    mock(:gen_tcp, [send: 2], fn _socket, serialized_request ->
+      refute serialized_request =~ "\r\nX-Injected"
+      assert serialized_request =~ ~s(username="a%0D%0AX-Injected%3A%201")
+      mock_response(serialized_request)
+    end)
+
+    parsed_uri = URI.parse("rtsp://a%0D%0AX-Injected%3A%201:pw@localhost:5554/s")
+    state = %State{state | uri: parsed_uri, auth: {:digest, %{nonce: "nonce", realm: "realm"}}}
+
+    assert {:reply, {:ok, _response}, _state} = RTSP.handle_call({:execute, request}, nil, state)
+  end
+
   defp mock_response(request) do
     [_line, rest] = String.split(request, "\r\n", parts: 2)
     {:ok, @response_header <> rest}
